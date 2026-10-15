@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+s<!DOCTYPE html>
 <html lang="tr">
 <head>
     <meta charset="UTF-8">
@@ -3154,6 +3154,1586 @@ function evTimeInit(startVal, endVal) {
   if(si) si.value = _evTimes.start;
   if(ei) ei.value = _evTimes.end;
 }
+/* ============================================================================
+   ODAK PRO ENHANCEMENT PATCH v2.0
+   - Bug Fixes: Pazar İstatistiği, Streak Koruması, Aktif Sayaç Kurtarma
+   - Yeni Özellikler: Ortam Sesleri (Brown/Pink Noise), Zen Modu, Manuel Oturum,
+     Tekil Oturum Silme, JSON Yedekleme/Yükleme, 84 Günlük Isı Haritası (Heatmap)
+   ============================================================================ */
+
+(function initOdakProPatch() {
+  // 1. EK STİLLER (Zen Modu, Ortam Sesi Butonları, Heatmap, Aksiyon Butonları)
+  const proStyles = document.createElement('style');
+  proStyles.textContent = `
+    body.zen-mode .app-header,
+    body.zen-mode .bottom-nav,
+    body.zen-mode .daily-progress-row,
+    body.zen-mode .subject-selector,
+    body.zen-mode #pomoSetRow,
+    body.zen-mode .timer-mode-row,
+    body.zen-mode #page-sayac > div:not(#timerCard) {
+      opacity: 0 !important;
+      pointer-events: none !important;
+      height: 0 !important;
+      margin: 0 !important;
+      padding: 0 !important;
+      overflow: hidden !important;
+      transition: opacity 0.35s ease;
+    }
+    body.zen-mode #page-sayac {
+      display: flex !important;
+      flex-direction: column;
+      justify-content: center;
+      min-height: 100dvh;
+      padding-top: 20px !important;
+    }
+    body.zen-mode .timer-card {
+      padding: 42px 24px !important;
+      box-shadow: var(--nm-shadow) !important;
+    }
+    body.zen-mode .timer-ring {
+      width: 260px !important;
+      height: 260px !important;
+      margin-bottom: 28px !important;
+    }
+    .timer-top-tools {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+      gap: 8px;
+    }
+    .tool-pill {
+      background: var(--card2);
+      box-shadow: var(--nm-shadow-sm);
+      border: none;
+      border-radius: 12px;
+      padding: 7px 11px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--label2);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-family: var(--font);
+      transition: all 0.15s;
+    }
+    .tool-pill:active, .tool-pill.active {
+      box-shadow: var(--nm-inset-sm);
+      color: var(--primary);
+      background: var(--primary-light);
+    }
+    .heatmap-grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 5px;
+      margin-top: 10px;
+    }
+    .heatmap-col {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .heatmap-cell {
+      aspect-ratio: 1;
+      border-radius: 4px;
+      background: var(--fill2);
+      box-shadow: var(--nm-inset-sm);
+      position: relative;
+    }
+    .heatmap-legend {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 4px;
+      margin-top: 10px;
+      font-size: 10px;
+      color: var(--label3);
+    }
+    .heatmap-legend-box {
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+    }
+  `;
+  document.head.appendChild(proStyles);
+
+  // 2. ÇALIŞMA SERİSİ (STREAK) DÜZELTMESİ (Bugün çalışılmasa da dün varsa seriyi korur)
+  window.calcStreak = function() {
+    if (!state.sessions || state.sessions.length === 0) return 0;
+    const days = new Set(state.sessions.map(s => new Date(s.date).toDateString()));
+    let streak = 0;
+    const today = new Date();
+    const startOffset = days.has(today.toDateString()) ? 0 : 1;
+    for (let i = startOffset; i < 365; i++) {
+      const d = new Date(today);
+      d.setDate(today.getDate() - i);
+      if (days.has(d.toDateString())) streak++;
+      else break;
+    }
+    return streak;
+  };
+
+  // 3. PAZAR GÜNÜ HAFTALIK İSTATİSTİK DÜZELTMESİ + CANLI BAŞLIK
+  const _origRenderStats = window.renderStats;
+  window.renderStats = function() {
+    const now = new Date();
+    let sessions;
+    if (statsTab === 'week') {
+      const weekStart = new Date(now);
+      weekStart.setDate(now.getDate() - (now.getDay() + 6) % 7); // Pazartesi başlangıç
+      weekStart.setHours(0, 0, 0, 0);
+      sessions = state.sessions.filter(s => new Date(s.date) >= weekStart);
+    } else {
+      const monthAgo = new Date(now);
+      monthAgo.setDate(now.getDate() - 30);
+      sessions = state.sessions.filter(s => new Date(s.date) >= monthAgo);
+    }
+    const totalSecs = sessions.reduce((a, s) => a + s.duration, 0);
+    const totalMins = Math.floor(totalSecs / 60);
+    document.getElementById('statTotalTime').textContent = formatDurationMins(totalMins);
+    document.getElementById('statSessions').textContent = sessions.length;
+    const pomos = sessions.filter(s => s.duration >= POMO_WORK).length;
+    const el_p = document.getElementById('statPomos');
+    if (el_p) el_p.textContent = pomos;
+    const daySet = new Set(sessions.map(s => new Date(s.date).toDateString()));
+    const avgMins = Math.floor(totalMins / Math.max(daySet.size, 1));
+    const el_a = document.getElementById('statAvgDay');
+    if (el_a) el_a.textContent = formatDurationMins(avgMins);
+    renderStreak();
+    renderBarChart(sessions);
+    renderSubjectTime(sessions);
+  };
+
+  // 4. WEB AUDIO ORTAM SESLERİ MOTORU (Sıfır Boyutlu Brown Noise & Yağmur Sesi)
+  let _noiseNode = null;
+  let _noiseGain = null;
+  let _currentNoise = 'off'; // 'off' | 'brown' | 'rain'
+
+  window.cycleAmbientNoise = function(btn) {
+    const modes = ['off', 'brown', 'rain'];
+    const labels = { off: '🎧 Ses: Kapalı', brown: '🌊 Derin Odak', rain: '🌧️ Yağmur' };
+    _currentNoise = modes[(modes.indexOf(_currentNoise) + 1) % modes.length];
+    btn.textContent = labels[_currentNoise];
+    btn.classList.toggle('active', _currentNoise !== 'off');
+    if (_currentNoise === 'off') {
+      stopAmbientNoise();
+    } else {
+      startAmbientNoise(_currentNoise);
+    }
+  };
+
+  function startAmbientNoise(type) {
+    stopAmbientNoise();
+    try {
+      const ctx = getAudioCtx();
+      const bufferSize = 2 * ctx.sampleRate;
+      const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+      const output = noiseBuffer.getChannelData(0);
+      let lastOut = 0.0;
+      for (let i = 0; i < bufferSize; i++) {
+        const white = Math.random() * 2 - 1;
+        if (type === 'brown') {
+          output[i] = (lastOut + (0.02 * white)) / 1.02;
+          lastOut = output[i];
+          output[i] *= 3.5;
+        } else {
+          // Pink / Rain benzeri filtre
+          output[i] = (lastOut + (0.08 * white)) / 1.08;
+          lastOut = output[i];
+          output[i] *= 1.8;
+        }
+      }
+      _noiseNode = ctx.createBufferSource();
+      _noiseNode.buffer = noiseBuffer;
+      _noiseNode.loop = true;
+
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = type === 'brown' ? 420 : 1100;
+
+      _noiseGain = ctx.createGain();
+      _noiseGain.gain.setValueAtTime(0.01, ctx.currentTime);
+      _noiseGain.gain.linearRampToValueAtTime(0.18, ctx.currentTime + 0.8);
+
+      _noiseNode.connect(filter);
+      filter.connect(_noiseGain);
+      _noiseGain.connect(ctx.destination);
+      _noiseNode.start(0);
+    } catch (e) { console.error(e); }
+  }
+
+  function stopAmbientNoise() {
+    if (_noiseNode) {
+      try { _noiseNode.stop(); _noiseNode.disconnect(); } catch (e) {}
+      _noiseNode = null;
+    }
+  }
+
+  // 5. ZEN MODU (Tam Ekran Odak)
+  window.toggleZenMode = function(btn) {
+    const isZen = document.body.classList.toggle('zen-mode');
+    if (btn) {
+      btn.classList.toggle('active', isZen);
+      btn.textContent = isZen ? '✕ Zen Çıkış' : '🧘 Zen Modu';
+    }
+  };
+
+  // Sayaç Kartına Üst Araç Çubuğu Ekleme
+  const timerCard = document.getElementById('timerCard');
+  if (timerCard) {
+    const toolsRow = document.createElement('div');
+    toolsRow.className = 'timer-top-tools';
+    toolsRow.innerHTML = `
+      <button class="tool-pill" id="ambientBtn" onclick="cycleAmbientNoise(this)">🎧 Ses: Kapalı</button>
+      <button class="tool-pill" id="zenModeBtn" onclick="toggleZenMode(this)">🧘 Zen Modu</button>
+    `;
+    timerCard.insertBefore(toolsRow, timerCard.firstChild);
+  }
+
+  // 6. AKTİF SAYACI KORUMA VE SEKME BAŞLIĞINDA CANLI SÜRE
+  function backupActiveTimer() {
+    if (timer.running || timer.paused) {
+      localStorage.setItem('odak_active_timer', JSON.stringify({
+        running: timer.running,
+        paused: timer.paused,
+        startTime: timer.startTime,
+        accumulated: timer.accumulated,
+        pomoStartRem: timer.pomoStartRem,
+        timerMode,
+        pomoPhase,
+        selectedDersId: state.selectedDersId
+      }));
+    } else {
+      localStorage.removeItem('odak_active_timer');
+      document.title = 'Odak';
+    }
+  }
+
+  const _origTick = window.tickTimer;
+  window.tickTimer = function() {
+    _origTick();
+    const disp = document.getElementById('timerDisplay')?.textContent || '';
+    const dName = getDersName(state.selectedDersId) || 'Odak';
+    document.title = `${disp.replace(/^00:/, '')} · ${dName}`;
+    backupActiveTimer();
+  };
+
+  const _origPause = window.pauseTimer;
+  window.pauseTimer = function() { _origPause(); backupActiveTimer(); };
+
+  const _origReset = window.resetTimer;
+  window.resetTimer = function() {
+    _origReset();
+    localStorage.removeItem('odak_active_timer');
+    document.title = 'Odak';
+    if (document.body.classList.contains('zen-mode')) {
+      toggleZenMode(document.getElementById('zenModeBtn'));
+    }
+  };
+
+  // Sayfa açıldığında yarım kalan sayacı geri yükle
+  try {
+    const savedT = JSON.parse(localStorage.getItem('odak_active_timer') || 'null');
+    if (savedT && (savedT.running || savedT.paused)) {
+      state.selectedDersId = savedT.selectedDersId;
+      updateSelectedSubject();
+      timerMode = savedT.timerMode || 'free';
+      pomoPhase = savedT.pomoPhase || 'work';
+      timer.accumulated = savedT.accumulated || 0;
+      timer.pomoStartRem = savedT.pomoStartRem || POMO_WORK;
+      if (savedT.running && savedT.startTime) {
+        timer.running = true;
+        timer.paused = false;
+        timer.startTime = savedT.startTime;
+        timer.interval = setInterval(window.tickTimer, 1000);
+        document.getElementById('mainBtn').textContent = 'Durdur';
+        document.getElementById('mainBtn').className = 'btn btn-danger';
+        document.getElementById('timerCard').classList.add('running');
+        showStopBtn();
+        window.tickTimer();
+        showToast('⏱️ Devam eden sayaç kurtarıldı');
+      }
+    }
+  } catch (e) {}
+
+  // 7. GEÇMİŞTE TEKİL OTURUM SİLME VE GEÇMİŞ LİSTESİNDEN DETAY AÇMA
+  const _origOpenSD = window.openSessionDetail;
+  window.openSessionDetail = function(sessionId) {
+    _origOpenSD(sessionId);
+    const body = document.getElementById('sdBody');
+    if (body && !document.getElementById('sdDeleteBtn')) {
+      const delBtn = document.createElement('button');
+      delBtn.id = 'sdDeleteBtn';
+      delBtn.className = 'btn btn-danger';
+      delBtn.style.cssText = 'width:100%;margin-top:10px;padding:12px;font-size:14px';
+      delBtn.textContent = '🗑 Bu Oturumu Sil';
+      delBtn.onclick = function() {
+        state.sessions = state.sessions.filter(x => x.id !== sessionId);
+        save();
+        closeModal('sessionDetailModal');
+        renderHistory();
+        renderStats();
+        renderHedefler();
+        updateDailyProgress();
+        renderCalendar();
+        showToast('Oturum silindi');
+      };
+      body.appendChild(delBtn);
+    }
+  };
+
+  // Geçmiş listesindeki öğelere tıklayınca detay ve silme penceresi açılsın
+  const _origRenderHistory = window.renderHistory;
+  window.renderHistory = function() {
+    _origRenderHistory();
+    const items = document.querySelectorAll('#historyContainer .history-item');
+    const sorted = [...state.sessions].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 20);
+    items.forEach((el, idx) => {
+      if (sorted[idx]) {
+        el.style.cursor = 'pointer';
+        el.onclick = () => openSessionDetail(sorted[idx].id);
+      }
+    });
+  };
+  window.renderHistory();
+
+  // 8. MANUEL OTURUM EKLEME (Sayacı Açmayı Unutanlar İçin)
+  const histHeader = document.querySelector('#page-sayac .section-title')?.parentElement;
+  if (histHeader) {
+    const btnGroup = document.createElement('div');
+    btnGroup.style.cssText = 'display:flex;gap:6px;align-items:center';
+    const clearBtn = histHeader.querySelector('button');
+    const addManualBtn = document.createElement('button');
+    addManualBtn.textContent = '+ Manuel Ekle';
+    addManualBtn.style.cssText = 'font-size:12px;font-weight:600;color:var(--primary);background:var(--primary-light);border:none;cursor:pointer;padding:5px 10px;border-radius:10px';
+    addManualBtn.onclick = openManualSessionModal;
+    btnGroup.appendChild(addManualBtn);
+    if (clearBtn) btnGroup.appendChild(clearBtn);
+    histHeader.appendChild(btnGroup);
+  }
+
+  const manualModalHTML = `
+    <div class="modal-overlay" id="manualSessionModal">
+      <div class="modal">
+        <div class="modal-handle"></div>
+        <div class="modal-title">⏱️ Manuel Çalışma Ekle</div>
+        <div class="input-group">
+          <div class="input-label">Ders</div>
+          <select class="input-field" id="manualDersSelect"></select>
+        </div>
+        <div class="input-group">
+          <div class="input-label">Süre (Dakika)</div>
+          <input class="input-field" id="manualDurInput" type="number" min="1" max="600" value="40" placeholder="Örn: 45">
+        </div>
+        <div class="input-group">
+          <div class="input-label">Tarih & Saat</div>
+          <input class="input-field" id="manualDateInput" type="datetime-local">
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" onclick="closeModal('manualSessionModal')" style="flex:1">İptal</button>
+          <button class="btn btn-primary" onclick="saveManualSession()" style="flex:2">Ekle</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.insertAdjacentHTML('beforeend', manualModalHTML);
+
+  window.openManualSessionModal = function() {
+    if (state.dersler.length === 0) getOrCreateUnnamedDers();
+    const sel = document.getElementById('manualDersSelect');
+    sel.innerHTML = state.dersler.map(d => `<option value="${d.id}">${d.name}</option>`).join('');
+    if (state.selectedDersId) sel.value = state.selectedDersId;
+    const now = new Date();
+    now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+    document.getElementById('manualDateInput').value = now.toISOString().slice(0, 16);
+    openModal('manualSessionModal');
+  };
+
+  window.saveManualSession = function() {
+    const dersId = Number(document.getElementById('manualDersSelect').value);
+    const mins = parseInt(document.getElementById('manualDurInput').value) || 0;
+    const dateVal = document.getElementById('manualDateInput').value;
+    if (mins < 1) { showToast('Geçerli bir süre girin'); return; }
+    const dt = dateVal ? new Date(dateVal) : new Date();
+    state.sessions.push({
+      id: Date.now(),
+      dersId,
+      duration: mins * 60,
+      date: dt.toISOString()
+    });
+    save();
+    closeModal('manualSessionModal');
+    renderHistory();
+    renderStats();
+    renderHedefler();
+    updateDailyProgress();
+    renderDersler();
+    showToast('✓ Manuel oturum eklendi');
+  };
+
+  // 9. TAM YEDEKLEME (JSON EXPORT / IMPORT)
+  const dataSettingsRow = document.querySelector('#settingsModal .settings-row:last-of-type');
+  if (dataSettingsRow) {
+    dataSettingsRow.insertAdjacentHTML('beforeend', `
+      <div class="settings-item" onclick="exportFullJSON()" style="cursor:pointer">
+        <span class="settings-item-icon">💾</span>
+        <span class="settings-item-label">Tam Yedeği İndir (.JSON)</span>
+        <span style="color:var(--primary);font-size:13px">›</span>
+      </div>
+      <div class="settings-item" onclick="document.getElementById('jsonImportInput').click()" style="cursor:pointer">
+        <span class="settings-item-icon">📥</span>
+        <span class="settings-item-label">Yedekten Geri Yükle (.JSON)</span>
+        <span style="color:var(--primary);font-size:13px">›</span>
+      </div>
+      <input type="file" id="jsonImportInput" accept=".json" style="display:none" onchange="importFullJSON(event)">
+    `);
+  }
+
+  window.exportFullJSON = function() {
+    const payload = { version: 2, exportedAt: new Date().toISOString(), state, themeSettings };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `odak-yedek-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('✓ Tam yedek indirildi');
+  };
+
+  window.importFullJSON = function(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(evt) {
+      try {
+        const parsed = JSON.parse(evt.target.result);
+        const newState = parsed.state || parsed;
+        if (!Array.isArray(newState.dersler) || !Array.isArray(newState.sessions)) {
+          showToast('⚠️ Geçersiz yedek dosyası');
+          return;
+        }
+        state = newState;
+        if (parsed.themeSettings) {
+          themeSettings = parsed.themeSettings;
+          localStorage.setItem('dersTheme', JSON.stringify(themeSettings));
+        }
+        save();
+        init();
+        closeModal('settingsModal');
+        showToast('🎉 Yedek başarıyla yüklendi!');
+      } catch (err) {
+        showToast('⚠️ Dosya okunamadı');
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  // 10. GITHUB TARZI 84 GÜNLÜK AKTİVİTE ISI HARİTASI (HEATMAP)
+  const _origWeeklySummary = window.renderWeeklySummary;
+  window.renderWeeklySummary = function() {
+    _origWeeklySummary();
+    const summView = document.getElementById('statsSummaryView');
+    if (!summView) return;
+    let hmCard = document.getElementById('heatmapCard');
+    if (!hmCard) {
+      hmCard = document.createElement('div');
+      hmCard.id = 'heatmapCard';
+      hmCard.className = 'chart-card';
+      summView.appendChild(hmCard);
+    }
+    const dayMap = {};
+    state.sessions.forEach(s => {
+      const k = new Date(s.date).toDateString();
+      dayMap[k] = (dayMap[k] || 0) + s.duration;
+    });
+    const today = new Date();
+    const colsHTML = [];
+    for (let w = 11; w >= 0; w--) {
+      let cells = '';
+      for (let d = 6; d >= 0; d--) {
+        const target = new Date(today);
+        target.setDate(today.getDate() - (w * 7 + d));
+        const secs = dayMap[target.toDateString()] || 0;
+        const mins = Math.floor(secs / 60);
+        let bg = 'var(--fill2)';
+        if (mins > 0 && mins < 30) bg = 'color-mix(in srgb, var(--primary) 35%, var(--fill2))';
+        else if (mins >= 30 && mins < 90) bg = 'color-mix(in srgb, var(--primary) 65%, var(--fill2))';
+        else if (mins >= 90) bg = 'var(--primary)';
+        const title = `${target.toLocaleDateString('tr-TR', {day:'numeric',month:'short'})}: ${mins}dk`;
+        cells += `<div class="heatmap-cell" style="background:${bg}" title="${title}"></div>`;
+      }
+      colsHTML.push(`<div class="heatmap-col">${cells}</div>`);
+    }
+    hmCard.innerHTML = `
+      <div class="chart-title">🟩 Son 12 Hafta Yoğunluğu</div>
+      <div class="heatmap-grid">${colsHTML.join('')}</div>
+      <div class="heatmap-legend">
+        <span>Az</span>
+        <div class="heatmap-legend-box" style="background:var(--fill2)"></div>
+        <div class="heatmap-legend-box" style="background:color-mix(in srgb, var(--primary) 35%, var(--fill2))"></div>
+        <div class="heatmap-legend-box" style="background:color-mix(in srgb, var(--primary) 65%, var(--fill2))"></div>
+        <div class="heatmap-legend-box" style="background:var(--primary)"></div>
+        <span>Çok</span>
+      </div>
+    `;
+  };
+})();
+    /* ============================================================================
+   ODAK PRO ENHANCEMENT PATCH v2.0
+   - Bug Fixes: Pazar İstatistiği, Streak Koruması, Aktif Sayaç Kurtarma
+   - Yeni Özellikler: Ortam Sesleri (Brown/Pink Noise), Zen Modu, Manuel Oturum,
+     Tekil Oturum Silme, JSON Yedekleme/Yükleme, 84 Günlük Isı Haritası (Heatmap)
+   ============================================================================ */
+
+(function initOdakProPatch() {
+  // 1. EK STİLLER (Zen Modu, Ortam Sesi Butonları, Heatmap, Aksiyon Butonları)
+  const proStyles = document.createElement('style');
+  proStyles.textContent = `
+    body.zen-mode .app-header,
+    body.zen-mode .bottom-nav,
+    body.zen-mode .daily-progress-row,
+    body.zen-mode .subject-selector,
+    body.zen-mode #pomoSetRow,
+    body.zen-mode .timer-mode-row,
+    body.zen-mode #page-sayac > div:not(#timerCard) {
+      opacity: 0 !important;
+      pointer-events: none !important;
+      height: 0 !important;
+      margin: 0 !important;
+      padding: 0 !important;
+      overflow: hidden !important;
+      transition: opacity 0.35s ease;
+    }
+    body.zen-mode #page-sayac {
+      display: flex !important;
+      flex-direction: column;
+      justify-content: center;
+      min-height: 100dvh;
+      padding-top: 20px !important;
+    }
+    body.zen-mode .timer-card {
+      padding: 42px 24px !important;
+      box-shadow: var(--nm-shadow) !important;
+    }
+    body.zen-mode .timer-ring {
+      width: 260px !important;
+      height: 260px !important;
+      margin-bottom: 28px !important;
+    }
+    .timer-top-tools {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+      gap: 8px;
+    }
+    .tool-pill {
+      background: var(--card2);
+      box-shadow: var(--nm-shadow-sm);
+      border: none;
+      border-radius: 12px;
+      padding: 7px 11px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--label2);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-family: var(--font);
+      transition: all 0.15s;
+    }
+    .tool-pill:active, .tool-pill.active {
+      box-shadow: var(--nm-inset-sm);
+      color: var(--primary);
+      background: var(--primary-light);
+    }
+    .heatmap-grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 5px;
+      margin-top: 10px;
+    }
+    .heatmap-col {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .heatmap-cell {
+      aspect-ratio: 1;
+      border-radius: 4px;
+      background: var(--fill2);
+      box-shadow: var(--nm-inset-sm);
+      position: relative;
+    }
+    .heatmap-legend {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 4px;
+      margin-top: 10px;
+      font-size: 10px;
+      color: var(--label3);
+    }
+    .heatmap-legend-box {
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+    }
+  `;
+  document.head.appendChild(proStyles);
+
+  // 2. ÇALIŞMA SERİSİ (STREAK) DÜZELTMESİ (Bugün çalışılmasa da dün varsa seriyi korur)
+  window.calcStreak = function() {
+    if (!state.sessions || state.sessions.length === 0) return 0;
+    const days = new Set(state.sessions.map(s => new Date(s.date).toDateString()));
+    let streak = 0;
+    const today = new Date();
+    const startOffset = days.has(today.toDateString()) ? 0 : 1;
+    for (let i = startOffset; i < 365; i++) {
+      const d = new Date(today);
+      d.setDate(today.getDate() - i);
+      if (days.has(d.toDateString())) streak++;
+      else break;
+    }
+    return streak;
+  };
+
+  // 3. PAZAR GÜNÜ HAFTALIK İSTATİSTİK DÜZELTMESİ + CANLI BAŞLIK
+  const _origRenderStats = window.renderStats;
+  window.renderStats = function() {
+    const now = new Date();
+    let sessions;
+    if (statsTab === 'week') {
+      const weekStart = new Date(now);
+      weekStart.setDate(now.getDate() - (now.getDay() + 6) % 7); // Pazartesi başlangıç
+      weekStart.setHours(0, 0, 0, 0);
+      sessions = state.sessions.filter(s => new Date(s.date) >= weekStart);
+    } else {
+      const monthAgo = new Date(now);
+      monthAgo.setDate(now.getDate() - 30);
+      sessions = state.sessions.filter(s => new Date(s.date) >= monthAgo);
+    }
+    const totalSecs = sessions.reduce((a, s) => a + s.duration, 0);
+    const totalMins = Math.floor(totalSecs / 60);
+    document.getElementById('statTotalTime').textContent = formatDurationMins(totalMins);
+    document.getElementById('statSessions').textContent = sessions.length;
+    const pomos = sessions.filter(s => s.duration >= POMO_WORK).length;
+    const el_p = document.getElementById('statPomos');
+    if (el_p) el_p.textContent = pomos;
+    const daySet = new Set(sessions.map(s => new Date(s.date).toDateString()));
+    const avgMins = Math.floor(totalMins / Math.max(daySet.size, 1));
+    const el_a = document.getElementById('statAvgDay');
+    if (el_a) el_a.textContent = formatDurationMins(avgMins);
+    renderStreak();
+    renderBarChart(sessions);
+    renderSubjectTime(sessions);
+  };
+
+  // 4. WEB AUDIO ORTAM SESLERİ MOTORU (Sıfır Boyutlu Brown Noise & Yağmur Sesi)
+  let _noiseNode = null;
+  let _noiseGain = null;
+  let _currentNoise = 'off'; // 'off' | 'brown' | 'rain'
+
+  window.cycleAmbientNoise = function(btn) {
+    const modes = ['off', 'brown', 'rain'];
+    const labels = { off: '🎧 Ses: Kapalı', brown: '🌊 Derin Odak', rain: '🌧️ Yağmur' };
+    _currentNoise = modes[(modes.indexOf(_currentNoise) + 1) % modes.length];
+    btn.textContent = labels[_currentNoise];
+    btn.classList.toggle('active', _currentNoise !== 'off');
+    if (_currentNoise === 'off') {
+      stopAmbientNoise();
+    } else {
+      startAmbientNoise(_currentNoise);
+    }
+  };
+
+  function startAmbientNoise(type) {
+    stopAmbientNoise();
+    try {
+      const ctx = getAudioCtx();
+      const bufferSize = 2 * ctx.sampleRate;
+      const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+      const output = noiseBuffer.getChannelData(0);
+      let lastOut = 0.0;
+      for (let i = 0; i < bufferSize; i++) {
+        const white = Math.random() * 2 - 1;
+        if (type === 'brown') {
+          output[i] = (lastOut + (0.02 * white)) / 1.02;
+          lastOut = output[i];
+          output[i] *= 3.5;
+        } else {
+          // Pink / Rain benzeri filtre
+          output[i] = (lastOut + (0.08 * white)) / 1.08;
+          lastOut = output[i];
+          output[i] *= 1.8;
+        }
+      }
+      _noiseNode = ctx.createBufferSource();
+      _noiseNode.buffer = noiseBuffer;
+      _noiseNode.loop = true;
+
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = type === 'brown' ? 420 : 1100;
+
+      _noiseGain = ctx.createGain();
+      _noiseGain.gain.setValueAtTime(0.01, ctx.currentTime);
+      _noiseGain.gain.linearRampToValueAtTime(0.18, ctx.currentTime + 0.8);
+
+      _noiseNode.connect(filter);
+      filter.connect(_noiseGain);
+      _noiseGain.connect(ctx.destination);
+      _noiseNode.start(0);
+    } catch (e) { console.error(e); }
+  }
+
+  function stopAmbientNoise() {
+    if (_noiseNode) {
+      try { _noiseNode.stop(); _noiseNode.disconnect(); } catch (e) {}
+      _noiseNode = null;
+    }
+  }
+
+  // 5. ZEN MODU (Tam Ekran Odak)
+  window.toggleZenMode = function(btn) {
+    const isZen = document.body.classList.toggle('zen-mode');
+    if (btn) {
+      btn.classList.toggle('active', isZen);
+      btn.textContent = isZen ? '✕ Zen Çıkış' : '🧘 Zen Modu';
+    }
+  };
+
+  // Sayaç Kartına Üst Araç Çubuğu Ekleme
+  const timerCard = document.getElementById('timerCard');
+  if (timerCard) {
+    const toolsRow = document.createElement('div');
+    toolsRow.className = 'timer-top-tools';
+    toolsRow.innerHTML = `
+      <button class="tool-pill" id="ambientBtn" onclick="cycleAmbientNoise(this)">🎧 Ses: Kapalı</button>
+      <button class="tool-pill" id="zenModeBtn" onclick="toggleZenMode(this)">🧘 Zen Modu</button>
+    `;
+    timerCard.insertBefore(toolsRow, timerCard.firstChild);
+  }
+
+  // 6. AKTİF SAYACI KORUMA VE SEKME BAŞLIĞINDA CANLI SÜRE
+  function backupActiveTimer() {
+    if (timer.running || timer.paused) {
+      localStorage.setItem('odak_active_timer', JSON.stringify({
+        running: timer.running,
+        paused: timer.paused,
+        startTime: timer.startTime,
+        accumulated: timer.accumulated,
+        pomoStartRem: timer.pomoStartRem,
+        timerMode,
+        pomoPhase,
+        selectedDersId: state.selectedDersId
+      }));
+    } else {
+      localStorage.removeItem('odak_active_timer');
+      document.title = 'Odak';
+    }
+  }
+
+  const _origTick = window.tickTimer;
+  window.tickTimer = function() {
+    _origTick();
+    const disp = document.getElementById('timerDisplay')?.textContent || '';
+    const dName = getDersName(state.selectedDersId) || 'Odak';
+    document.title = `${disp.replace(/^00:/, '')} · ${dName}`;
+    backupActiveTimer();
+  };
+
+  const _origPause = window.pauseTimer;
+  window.pauseTimer = function() { _origPause(); backupActiveTimer(); };
+
+  const _origReset = window.resetTimer;
+  window.resetTimer = function() {
+    _origReset();
+    localStorage.removeItem('odak_active_timer');
+    document.title = 'Odak';
+    if (document.body.classList.contains('zen-mode')) {
+      toggleZenMode(document.getElementById('zenModeBtn'));
+    }
+  };
+
+  // Sayfa açıldığında yarım kalan sayacı geri yükle
+  try {
+    const savedT = JSON.parse(localStorage.getItem('odak_active_timer') || 'null');
+    if (savedT && (savedT.running || savedT.paused)) {
+      state.selectedDersId = savedT.selectedDersId;
+      updateSelectedSubject();
+      timerMode = savedT.timerMode || 'free';
+      pomoPhase = savedT.pomoPhase || 'work';
+      timer.accumulated = savedT.accumulated || 0;
+      timer.pomoStartRem = savedT.pomoStartRem || POMO_WORK;
+      if (savedT.running && savedT.startTime) {
+        timer.running = true;
+        timer.paused = false;
+        timer.startTime = savedT.startTime;
+        timer.interval = setInterval(window.tickTimer, 1000);
+        document.getElementById('mainBtn').textContent = 'Durdur';
+        document.getElementById('mainBtn').className = 'btn btn-danger';
+        document.getElementById('timerCard').classList.add('running');
+        showStopBtn();
+        window.tickTimer();
+        showToast('⏱️ Devam eden sayaç kurtarıldı');
+      }
+    }
+  } catch (e) {}
+
+  // 7. GEÇMİŞTE TEKİL OTURUM SİLME VE GEÇMİŞ LİSTESİNDEN DETAY AÇMA
+  const _origOpenSD = window.openSessionDetail;
+  window.openSessionDetail = function(sessionId) {
+    _origOpenSD(sessionId);
+    const body = document.getElementById('sdBody');
+    if (body && !document.getElementById('sdDeleteBtn')) {
+      const delBtn = document.createElement('button');
+      delBtn.id = 'sdDeleteBtn';
+      delBtn.className = 'btn btn-danger';
+      delBtn.style.cssText = 'width:100%;margin-top:10px;padding:12px;font-size:14px';
+      delBtn.textContent = '🗑 Bu Oturumu Sil';
+      delBtn.onclick = function() {
+        state.sessions = state.sessions.filter(x => x.id !== sessionId);
+        save();
+        closeModal('sessionDetailModal');
+        renderHistory();
+        renderStats();
+        renderHedefler();
+        updateDailyProgress();
+        renderCalendar();
+        showToast('Oturum silindi');
+      };
+      body.appendChild(delBtn);
+    }
+  };
+
+  // Geçmiş listesindeki öğelere tıklayınca detay ve silme penceresi açılsın
+  const _origRenderHistory = window.renderHistory;
+  window.renderHistory = function() {
+    _origRenderHistory();
+    const items = document.querySelectorAll('#historyContainer .history-item');
+    const sorted = [...state.sessions].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 20);
+    items.forEach((el, idx) => {
+      if (sorted[idx]) {
+        el.style.cursor = 'pointer';
+        el.onclick = () => openSessionDetail(sorted[idx].id);
+      }
+    });
+  };
+  window.renderHistory();
+
+  // 8. MANUEL OTURUM EKLEME (Sayacı Açmayı Unutanlar İçin)
+  const histHeader = document.querySelector('#page-sayac .section-title')?.parentElement;
+  if (histHeader) {
+    const btnGroup = document.createElement('div');
+    btnGroup.style.cssText = 'display:flex;gap:6px;align-items:center';
+    const clearBtn = histHeader.querySelector('button');
+    const addManualBtn = document.createElement('button');
+    addManualBtn.textContent = '+ Manuel Ekle';
+    addManualBtn.style.cssText = 'font-size:12px;font-weight:600;color:var(--primary);background:var(--primary-light);border:none;cursor:pointer;padding:5px 10px;border-radius:10px';
+    addManualBtn.onclick = openManualSessionModal;
+    btnGroup.appendChild(addManualBtn);
+    if (clearBtn) btnGroup.appendChild(clearBtn);
+    histHeader.appendChild(btnGroup);
+  }
+
+  const manualModalHTML = `
+    <div class="modal-overlay" id="manualSessionModal">
+      <div class="modal">
+        <div class="modal-handle"></div>
+        <div class="modal-title">⏱️ Manuel Çalışma Ekle</div>
+        <div class="input-group">
+          <div class="input-label">Ders</div>
+          <select class="input-field" id="manualDersSelect"></select>
+        </div>
+        <div class="input-group">
+          <div class="input-label">Süre (Dakika)</div>
+          <input class="input-field" id="manualDurInput" type="number" min="1" max="600" value="40" placeholder="Örn: 45">
+        </div>
+        <div class="input-group">
+          <div class="input-label">Tarih & Saat</div>
+          <input class="input-field" id="manualDateInput" type="datetime-local">
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" onclick="closeModal('manualSessionModal')" style="flex:1">İptal</button>
+          <button class="btn btn-primary" onclick="saveManualSession()" style="flex:2">Ekle</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.insertAdjacentHTML('beforeend', manualModalHTML);
+
+  window.openManualSessionModal = function() {
+    if (state.dersler.length === 0) getOrCreateUnnamedDers();
+    const sel = document.getElementById('manualDersSelect');
+    sel.innerHTML = state.dersler.map(d => `<option value="${d.id}">${d.name}</option>`).join('');
+    if (state.selectedDersId) sel.value = state.selectedDersId;
+    const now = new Date();
+    now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+    document.getElementById('manualDateInput').value = now.toISOString().slice(0, 16);
+    openModal('manualSessionModal');
+  };
+
+  window.saveManualSession = function() {
+    const dersId = Number(document.getElementById('manualDersSelect').value);
+    const mins = parseInt(document.getElementById('manualDurInput').value) || 0;
+    const dateVal = document.getElementById('manualDateInput').value;
+    if (mins < 1) { showToast('Geçerli bir süre girin'); return; }
+    const dt = dateVal ? new Date(dateVal) : new Date();
+    state.sessions.push({
+      id: Date.now(),
+      dersId,
+      duration: mins * 60,
+      date: dt.toISOString()
+    });
+    save();
+    closeModal('manualSessionModal');
+    renderHistory();
+    renderStats();
+    renderHedefler();
+    updateDailyProgress();
+    renderDersler();
+    showToast('✓ Manuel oturum eklendi');
+  };
+
+  // 9. TAM YEDEKLEME (JSON EXPORT / IMPORT)
+  const dataSettingsRow = document.querySelector('#settingsModal .settings-row:last-of-type');
+  if (dataSettingsRow) {
+    dataSettingsRow.insertAdjacentHTML('beforeend', `
+      <div class="settings-item" onclick="exportFullJSON()" style="cursor:pointer">
+        <span class="settings-item-icon">💾</span>
+        <span class="settings-item-label">Tam Yedeği İndir (.JSON)</span>
+        <span style="color:var(--primary);font-size:13px">›</span>
+      </div>
+      <div class="settings-item" onclick="document.getElementById('jsonImportInput').click()" style="cursor:pointer">
+        <span class="settings-item-icon">📥</span>
+        <span class="settings-item-label">Yedekten Geri Yükle (.JSON)</span>
+        <span style="color:var(--primary);font-size:13px">›</span>
+      </div>
+      <input type="file" id="jsonImportInput" accept=".json" style="display:none" onchange="importFullJSON(event)">
+    `);
+  }
+
+  window.exportFullJSON = function() {
+    const payload = { version: 2, exportedAt: new Date().toISOString(), state, themeSettings };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `odak-yedek-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('✓ Tam yedek indirildi');
+  };
+
+  window.importFullJSON = function(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(evt) {
+      try {
+        const parsed = JSON.parse(evt.target.result);
+        const newState = parsed.state || parsed;
+        if (!Array.isArray(newState.dersler) || !Array.isArray(newState.sessions)) {
+          showToast('⚠️ Geçersiz yedek dosyası');
+          return;
+        }
+        state = newState;
+        if (parsed.themeSettings) {
+          themeSettings = parsed.themeSettings;
+          localStorage.setItem('dersTheme', JSON.stringify(themeSettings));
+        }
+        save();
+        init();
+        closeModal('settingsModal');
+        showToast('🎉 Yedek başarıyla yüklendi!');
+      } catch (err) {
+        showToast('⚠️ Dosya okunamadı');
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  // 10. GITHUB TARZI 84 GÜNLÜK AKTİVİTE ISI HARİTASI (HEATMAP)
+  const _origWeeklySummary = window.renderWeeklySummary;
+  window.renderWeeklySummary = function() {
+    _origWeeklySummary();
+    const summView = document.getElementById('statsSummaryView');
+    if (!summView) return;
+    let hmCard = document.getElementById('heatmapCard');
+    if (!hmCard) {
+      hmCard = document.createElement('div');
+      hmCard.id = 'heatmapCard';
+      hmCard.className = 'chart-card';
+      summView.appendChild(hmCard);
+    }
+    const dayMap = {};
+    state.sessions.forEach(s => {
+      const k = new Date(s.date).toDateString();
+      dayMap[k] = (dayMap[k] || 0) + s.duration;
+    });
+    const today = new Date();
+    const colsHTML = [];
+    for (let w = 11; w >= 0; w--) {
+      let cells = '';
+      for (let d = 6; d >= 0; d--) {
+        const target = new Date(today);
+        target.setDate(today.getDate() - (w * 7 + d));
+        const secs = dayMap[target.toDateString()] || 0;
+        const mins = Math.floor(secs / 60);
+        let bg = 'var(--fill2)';
+        if (mins > 0 && mins < 30) bg = 'color-mix(in srgb, var(--primary) 35%, var(--fill2))';
+        else if (mins >= 30 && mins < 90) bg = 'color-mix(in srgb, var(--primary) 65%, var(--fill2))';
+        else if (mins >= 90) bg = 'var(--primary)';
+        const title = `${target.toLocaleDateString('tr-TR', {day:'numeric',month:'short'})}: ${mins}dk`;
+        cells += `<div class="heatmap-cell" style="background:${bg}" title="${title}"></div>`;
+      }
+      colsHTML.push(`<div class="heatmap-col">${cells}</div>`);
+    }
+    hmCard.innerHTML = `
+      <div class="chart-title">🟩 Son 12 Hafta Yoğunluğu</div>
+      <div class="heatmap-grid">${colsHTML.join('')}</div>
+      <div class="heatmap-legend">
+        <span>Az</span>
+        <div class="heatmap-legend-box" style="background:var(--fill2)"></div>
+        <div class="heatmap-legend-box" style="background:color-mix(in srgb, var(--primary) 35%, var(--fill2))"></div>
+        <div class="heatmap-legend-box" style="background:color-mix(in srgb, var(--primary) 65%, var(--fill2))"></div>
+        <div class="heatmap-legend-box" style="background:var(--primary)"></div>
+        <span>Çok</span>
+      </div>
+    `;
+  };
+})();
+      /* ============================================================================
+   ODAK PRO ENHANCEMENT PATCH v2.0
+   - Bug Fixes: Pazar İstatistiği, Streak Koruması, Aktif Sayaç Kurtarma
+   - Yeni Özellikler: Ortam Sesleri (Brown/Pink Noise), Zen Modu, Manuel Oturum,
+     Tekil Oturum Silme, JSON Yedekleme/Yükleme, 84 Günlük Isı Haritası (Heatmap)
+   ============================================================================ */
+
+(function initOdakProPatch() {
+  // 1. EK STİLLER (Zen Modu, Ortam Sesi Butonları, Heatmap, Aksiyon Butonları)
+  const proStyles = document.createElement('style');
+  proStyles.textContent = `
+    body.zen-mode .app-header,
+    body.zen-mode .bottom-nav,
+    body.zen-mode .daily-progress-row,
+    body.zen-mode .subject-selector,
+    body.zen-mode #pomoSetRow,
+    body.zen-mode .timer-mode-row,
+    body.zen-mode #page-sayac > div:not(#timerCard) {
+      opacity: 0 !important;
+      pointer-events: none !important;
+      height: 0 !important;
+      margin: 0 !important;
+      padding: 0 !important;
+      overflow: hidden !important;
+      transition: opacity 0.35s ease;
+    }
+    body.zen-mode #page-sayac {
+      display: flex !important;
+      flex-direction: column;
+      justify-content: center;
+      min-height: 100dvh;
+      padding-top: 20px !important;
+    }
+    body.zen-mode .timer-card {
+      padding: 42px 24px !important;
+      box-shadow: var(--nm-shadow) !important;
+    }
+    body.zen-mode .timer-ring {
+      width: 260px !important;
+      height: 260px !important;
+      margin-bottom: 28px !important;
+    }
+    .timer-top-tools {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+      gap: 8px;
+    }
+    .tool-pill {
+      background: var(--card2);
+      box-shadow: var(--nm-shadow-sm);
+      border: none;
+      border-radius: 12px;
+      padding: 7px 11px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--label2);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-family: var(--font);
+      transition: all 0.15s;
+    }
+    .tool-pill:active, .tool-pill.active {
+      box-shadow: var(--nm-inset-sm);
+      color: var(--primary);
+      background: var(--primary-light);
+    }
+    .heatmap-grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 5px;
+      margin-top: 10px;
+    }
+    .heatmap-col {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .heatmap-cell {
+      aspect-ratio: 1;
+      border-radius: 4px;
+      background: var(--fill2);
+      box-shadow: var(--nm-inset-sm);
+      position: relative;
+    }
+    .heatmap-legend {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 4px;
+      margin-top: 10px;
+      font-size: 10px;
+      color: var(--label3);
+    }
+    .heatmap-legend-box {
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+    }
+  `;
+  document.head.appendChild(proStyles);
+
+  // 2. ÇALIŞMA SERİSİ (STREAK) DÜZELTMESİ (Bugün çalışılmasa da dün varsa seriyi korur)
+  window.calcStreak = function() {
+    if (!state.sessions || state.sessions.length === 0) return 0;
+    const days = new Set(state.sessions.map(s => new Date(s.date).toDateString()));
+    let streak = 0;
+    const today = new Date();
+    const startOffset = days.has(today.toDateString()) ? 0 : 1;
+    for (let i = startOffset; i < 365; i++) {
+      const d = new Date(today);
+      d.setDate(today.getDate() - i);
+      if (days.has(d.toDateString())) streak++;
+      else break;
+    }
+    return streak;
+  };
+
+  // 3. PAZAR GÜNÜ HAFTALIK İSTATİSTİK DÜZELTMESİ + CANLI BAŞLIK
+  const _origRenderStats = window.renderStats;
+  window.renderStats = function() {
+    const now = new Date();
+    let sessions;
+    if (statsTab === 'week') {
+      const weekStart = new Date(now);
+      weekStart.setDate(now.getDate() - (now.getDay() + 6) % 7); // Pazartesi başlangıç
+      weekStart.setHours(0, 0, 0, 0);
+      sessions = state.sessions.filter(s => new Date(s.date) >= weekStart);
+    } else {
+      const monthAgo = new Date(now);
+      monthAgo.setDate(now.getDate() - 30);
+      sessions = state.sessions.filter(s => new Date(s.date) >= monthAgo);
+    }
+    const totalSecs = sessions.reduce((a, s) => a + s.duration, 0);
+    const totalMins = Math.floor(totalSecs / 60);
+    document.getElementById('statTotalTime').textContent = formatDurationMins(totalMins);
+    document.getElementById('statSessions').textContent = sessions.length;
+    const pomos = sessions.filter(s => s.duration >= POMO_WORK).length;
+    const el_p = document.getElementById('statPomos');
+    if (el_p) el_p.textContent = pomos;
+    const daySet = new Set(sessions.map(s => new Date(s.date).toDateString()));
+    const avgMins = Math.floor(totalMins / Math.max(daySet.size, 1));
+    const el_a = document.getElementById('statAvgDay');
+    if (el_a) el_a.textContent = formatDurationMins(avgMins);
+    renderStreak();
+    renderBarChart(sessions);
+    renderSubjectTime(sessions);
+  };
+
+  // 4. WEB AUDIO ORTAM SESLERİ MOTORU (Sıfır Boyutlu Brown Noise & Yağmur Sesi)
+  let _noiseNode = null;
+  let _noiseGain = null;
+  let _currentNoise = 'off'; // 'off' | 'brown' | 'rain'
+
+  window.cycleAmbientNoise = function(btn) {
+    const modes = ['off', 'brown', 'rain'];
+    const labels = { off: '🎧 Ses: Kapalı', brown: '🌊 Derin Odak', rain: '🌧️ Yağmur' };
+    _currentNoise = modes[(modes.indexOf(_currentNoise) + 1) % modes.length];
+    btn.textContent = labels[_currentNoise];
+    btn.classList.toggle('active', _currentNoise !== 'off');
+    if (_currentNoise === 'off') {
+      stopAmbientNoise();
+    } else {
+      startAmbientNoise(_currentNoise);
+    }
+  };
+
+  function startAmbientNoise(type) {
+    stopAmbientNoise();
+    try {
+      const ctx = getAudioCtx();
+      const bufferSize = 2 * ctx.sampleRate;
+      const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+      const output = noiseBuffer.getChannelData(0);
+      let lastOut = 0.0;
+      for (let i = 0; i < bufferSize; i++) {
+        const white = Math.random() * 2 - 1;
+        if (type === 'brown') {
+          output[i] = (lastOut + (0.02 * white)) / 1.02;
+          lastOut = output[i];
+          output[i] *= 3.5;
+        } else {
+          // Pink / Rain benzeri filtre
+          output[i] = (lastOut + (0.08 * white)) / 1.08;
+          lastOut = output[i];
+          output[i] *= 1.8;
+        }
+      }
+      _noiseNode = ctx.createBufferSource();
+      _noiseNode.buffer = noiseBuffer;
+      _noiseNode.loop = true;
+
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = type === 'brown' ? 420 : 1100;
+
+      _noiseGain = ctx.createGain();
+      _noiseGain.gain.setValueAtTime(0.01, ctx.currentTime);
+      _noiseGain.gain.linearRampToValueAtTime(0.18, ctx.currentTime + 0.8);
+
+      _noiseNode.connect(filter);
+      filter.connect(_noiseGain);
+      _noiseGain.connect(ctx.destination);
+      _noiseNode.start(0);
+    } catch (e) { console.error(e); }
+  }
+
+  function stopAmbientNoise() {
+    if (_noiseNode) {
+      try { _noiseNode.stop(); _noiseNode.disconnect(); } catch (e) {}
+      _noiseNode = null;
+    }
+  }
+
+  // 5. ZEN MODU (Tam Ekran Odak)
+  window.toggleZenMode = function(btn) {
+    const isZen = document.body.classList.toggle('zen-mode');
+    if (btn) {
+      btn.classList.toggle('active', isZen);
+      btn.textContent = isZen ? '✕ Zen Çıkış' : '🧘 Zen Modu';
+    }
+  };
+
+  // Sayaç Kartına Üst Araç Çubuğu Ekleme
+  const timerCard = document.getElementById('timerCard');
+  if (timerCard) {
+    const toolsRow = document.createElement('div');
+    toolsRow.className = 'timer-top-tools';
+    toolsRow.innerHTML = `
+      <button class="tool-pill" id="ambientBtn" onclick="cycleAmbientNoise(this)">🎧 Ses: Kapalı</button>
+      <button class="tool-pill" id="zenModeBtn" onclick="toggleZenMode(this)">🧘 Zen Modu</button>
+    `;
+    timerCard.insertBefore(toolsRow, timerCard.firstChild);
+  }
+
+  // 6. AKTİF SAYACI KORUMA VE SEKME BAŞLIĞINDA CANLI SÜRE
+  function backupActiveTimer() {
+    if (timer.running || timer.paused) {
+      localStorage.setItem('odak_active_timer', JSON.stringify({
+        running: timer.running,
+        paused: timer.paused,
+        startTime: timer.startTime,
+        accumulated: timer.accumulated,
+        pomoStartRem: timer.pomoStartRem,
+        timerMode,
+        pomoPhase,
+        selectedDersId: state.selectedDersId
+      }));
+    } else {
+      localStorage.removeItem('odak_active_timer');
+      document.title = 'Odak';
+    }
+  }
+
+  const _origTick = window.tickTimer;
+  window.tickTimer = function() {
+    _origTick();
+    const disp = document.getElementById('timerDisplay')?.textContent || '';
+    const dName = getDersName(state.selectedDersId) || 'Odak';
+    document.title = `${disp.replace(/^00:/, '')} · ${dName}`;
+    backupActiveTimer();
+  };
+
+  const _origPause = window.pauseTimer;
+  window.pauseTimer = function() { _origPause(); backupActiveTimer(); };
+
+  const _origReset = window.resetTimer;
+  window.resetTimer = function() {
+    _origReset();
+    localStorage.removeItem('odak_active_timer');
+    document.title = 'Odak';
+    if (document.body.classList.contains('zen-mode')) {
+      toggleZenMode(document.getElementById('zenModeBtn'));
+    }
+  };
+
+  // Sayfa açıldığında yarım kalan sayacı geri yükle
+  try {
+    const savedT = JSON.parse(localStorage.getItem('odak_active_timer') || 'null');
+    if (savedT && (savedT.running || savedT.paused)) {
+      state.selectedDersId = savedT.selectedDersId;
+      updateSelectedSubject();
+      timerMode = savedT.timerMode || 'free';
+      pomoPhase = savedT.pomoPhase || 'work';
+      timer.accumulated = savedT.accumulated || 0;
+      timer.pomoStartRem = savedT.pomoStartRem || POMO_WORK;
+      if (savedT.running && savedT.startTime) {
+        timer.running = true;
+        timer.paused = false;
+        timer.startTime = savedT.startTime;
+        timer.interval = setInterval(window.tickTimer, 1000);
+        document.getElementById('mainBtn').textContent = 'Durdur';
+        document.getElementById('mainBtn').className = 'btn btn-danger';
+        document.getElementById('timerCard').classList.add('running');
+        showStopBtn();
+        window.tickTimer();
+        showToast('⏱️ Devam eden sayaç kurtarıldı');
+      }
+    }
+  } catch (e) {}
+
+  // 7. GEÇMİŞTE TEKİL OTURUM SİLME VE GEÇMİŞ LİSTESİNDEN DETAY AÇMA
+  const _origOpenSD = window.openSessionDetail;
+  window.openSessionDetail = function(sessionId) {
+    _origOpenSD(sessionId);
+    const body = document.getElementById('sdBody');
+    if (body && !document.getElementById('sdDeleteBtn')) {
+      const delBtn = document.createElement('button');
+      delBtn.id = 'sdDeleteBtn';
+      delBtn.className = 'btn btn-danger';
+      delBtn.style.cssText = 'width:100%;margin-top:10px;padding:12px;font-size:14px';
+      delBtn.textContent = '🗑 Bu Oturumu Sil';
+      delBtn.onclick = function() {
+        state.sessions = state.sessions.filter(x => x.id !== sessionId);
+        save();
+        closeModal('sessionDetailModal');
+        renderHistory();
+        renderStats();
+        renderHedefler();
+        updateDailyProgress();
+        renderCalendar();
+        showToast('Oturum silindi');
+      };
+      body.appendChild(delBtn);
+    }
+  };
+
+  // Geçmiş listesindeki öğelere tıklayınca detay ve silme penceresi açılsın
+  const _origRenderHistory = window.renderHistory;
+  window.renderHistory = function() {
+    _origRenderHistory();
+    const items = document.querySelectorAll('#historyContainer .history-item');
+    const sorted = [...state.sessions].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 20);
+    items.forEach((el, idx) => {
+      if (sorted[idx]) {
+        el.style.cursor = 'pointer';
+        el.onclick = () => openSessionDetail(sorted[idx].id);
+      }
+    });
+  };
+  window.renderHistory();
+
+  // 8. MANUEL OTURUM EKLEME (Sayacı Açmayı Unutanlar İçin)
+  const histHeader = document.querySelector('#page-sayac .section-title')?.parentElement;
+  if (histHeader) {
+    const btnGroup = document.createElement('div');
+    btnGroup.style.cssText = 'display:flex;gap:6px;align-items:center';
+    const clearBtn = histHeader.querySelector('button');
+    const addManualBtn = document.createElement('button');
+    addManualBtn.textContent = '+ Manuel Ekle';
+    addManualBtn.style.cssText = 'font-size:12px;font-weight:600;color:var(--primary);background:var(--primary-light);border:none;cursor:pointer;padding:5px 10px;border-radius:10px';
+    addManualBtn.onclick = openManualSessionModal;
+    btnGroup.appendChild(addManualBtn);
+    if (clearBtn) btnGroup.appendChild(clearBtn);
+    histHeader.appendChild(btnGroup);
+  }
+
+  const manualModalHTML = `
+    <div class="modal-overlay" id="manualSessionModal">
+      <div class="modal">
+        <div class="modal-handle"></div>
+        <div class="modal-title">⏱️ Manuel Çalışma Ekle</div>
+        <div class="input-group">
+          <div class="input-label">Ders</div>
+          <select class="input-field" id="manualDersSelect"></select>
+        </div>
+        <div class="input-group">
+          <div class="input-label">Süre (Dakika)</div>
+          <input class="input-field" id="manualDurInput" type="number" min="1" max="600" value="40" placeholder="Örn: 45">
+        </div>
+        <div class="input-group">
+          <div class="input-label">Tarih & Saat</div>
+          <input class="input-field" id="manualDateInput" type="datetime-local">
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" onclick="closeModal('manualSessionModal')" style="flex:1">İptal</button>
+          <button class="btn btn-primary" onclick="saveManualSession()" style="flex:2">Ekle</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.insertAdjacentHTML('beforeend', manualModalHTML);
+
+  window.openManualSessionModal = function() {
+    if (state.dersler.length === 0) getOrCreateUnnamedDers();
+    const sel = document.getElementById('manualDersSelect');
+    sel.innerHTML = state.dersler.map(d => `<option value="${d.id}">${d.name}</option>`).join('');
+    if (state.selectedDersId) sel.value = state.selectedDersId;
+    const now = new Date();
+    now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+    document.getElementById('manualDateInput').value = now.toISOString().slice(0, 16);
+    openModal('manualSessionModal');
+  };
+
+  window.saveManualSession = function() {
+    const dersId = Number(document.getElementById('manualDersSelect').value);
+    const mins = parseInt(document.getElementById('manualDurInput').value) || 0;
+    const dateVal = document.getElementById('manualDateInput').value;
+    if (mins < 1) { showToast('Geçerli bir süre girin'); return; }
+    const dt = dateVal ? new Date(dateVal) : new Date();
+    state.sessions.push({
+      id: Date.now(),
+      dersId,
+      duration: mins * 60,
+      date: dt.toISOString()
+    });
+    save();
+    closeModal('manualSessionModal');
+    renderHistory();
+    renderStats();
+    renderHedefler();
+    updateDailyProgress();
+    renderDersler();
+    showToast('✓ Manuel oturum eklendi');
+  };
+
+  // 9. TAM YEDEKLEME (JSON EXPORT / IMPORT)
+  const dataSettingsRow = document.querySelector('#settingsModal .settings-row:last-of-type');
+  if (dataSettingsRow) {
+    dataSettingsRow.insertAdjacentHTML('beforeend', `
+      <div class="settings-item" onclick="exportFullJSON()" style="cursor:pointer">
+        <span class="settings-item-icon">💾</span>
+        <span class="settings-item-label">Tam Yedeği İndir (.JSON)</span>
+        <span style="color:var(--primary);font-size:13px">›</span>
+      </div>
+      <div class="settings-item" onclick="document.getElementById('jsonImportInput').click()" style="cursor:pointer">
+        <span class="settings-item-icon">📥</span>
+        <span class="settings-item-label">Yedekten Geri Yükle (.JSON)</span>
+        <span style="color:var(--primary);font-size:13px">›</span>
+      </div>
+      <input type="file" id="jsonImportInput" accept=".json" style="display:none" onchange="importFullJSON(event)">
+    `);
+  }
+
+  window.exportFullJSON = function() {
+    const payload = { version: 2, exportedAt: new Date().toISOString(), state, themeSettings };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `odak-yedek-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('✓ Tam yedek indirildi');
+  };
+
+  window.importFullJSON = function(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(evt) {
+      try {
+        const parsed = JSON.parse(evt.target.result);
+        const newState = parsed.state || parsed;
+        if (!Array.isArray(newState.dersler) || !Array.isArray(newState.sessions)) {
+          showToast('⚠️ Geçersiz yedek dosyası');
+          return;
+        }
+        state = newState;
+        if (parsed.themeSettings) {
+          themeSettings = parsed.themeSettings;
+          localStorage.setItem('dersTheme', JSON.stringify(themeSettings));
+        }
+        save();
+        init();
+        closeModal('settingsModal');
+        showToast('🎉 Yedek başarıyla yüklendi!');
+      } catch (err) {
+        showToast('⚠️ Dosya okunamadı');
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  // 10. GITHUB TARZI 84 GÜNLÜK AKTİVİTE ISI HARİTASI (HEATMAP)
+  const _origWeeklySummary = window.renderWeeklySummary;
+  window.renderWeeklySummary = function() {
+    _origWeeklySummary();
+    const summView = document.getElementById('statsSummaryView');
+    if (!summView) return;
+    let hmCard = document.getElementById('heatmapCard');
+    if (!hmCard) {
+      hmCard = document.createElement('div');
+      hmCard.id = 'heatmapCard';
+      hmCard.className = 'chart-card';
+      summView.appendChild(hmCard);
+    }
+    const dayMap = {};
+    state.sessions.forEach(s => {
+      const k = new Date(s.date).toDateString();
+      dayMap[k] = (dayMap[k] || 0) + s.duration;
+    });
+    const today = new Date();
+    const colsHTML = [];
+    for (let w = 11; w >= 0; w--) {
+      let cells = '';
+      for (let d = 6; d >= 0; d--) {
+        const target = new Date(today);
+        target.setDate(today.getDate() - (w * 7 + d));
+        const secs = dayMap[target.toDateString()] || 0;
+        const mins = Math.floor(secs / 60);
+        let bg = 'var(--fill2)';
+        if (mins > 0 && mins < 30) bg = 'color-mix(in srgb, var(--primary) 35%, var(--fill2))';
+        else if (mins >= 30 && mins < 90) bg = 'color-mix(in srgb, var(--primary) 65%, var(--fill2))';
+        else if (mins >= 90) bg = 'var(--primary)';
+        const title = `${target.toLocaleDateString('tr-TR', {day:'numeric',month:'short'})}: ${mins}dk`;
+        cells += `<div class="heatmap-cell" style="background:${bg}" title="${title}"></div>`;
+      }
+      colsHTML.push(`<div class="heatmap-col">${cells}</div>`);
+    }
+    hmCard.innerHTML = `
+      <div class="chart-title">🟩 Son 12 Hafta Yoğunluğu</div>
+      <div class="heatmap-grid">${colsHTML.join('')}</div>
+      <div class="heatmap-legend">
+        <span>Az</span>
+        <div class="heatmap-legend-box" style="background:var(--fill2)"></div>
+        <div class="heatmap-legend-box" style="background:color-mix(in srgb, var(--primary) 35%, var(--fill2))"></div>
+        <div class="heatmap-legend-box" style="background:color-mix(in srgb, var(--primary) 65%, var(--fill2))"></div>
+        <div class="heatmap-legend-box" style="background:var(--primary)"></div>
+        <span>Çok</span>
+      </div>
+    `;
+  };
+})();
+
+    2
 </script>
 </body>
 </html>
